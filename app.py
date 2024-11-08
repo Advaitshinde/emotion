@@ -1,10 +1,11 @@
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, request, jsonify
 import cv2
 import numpy as np
 from tensorflow.keras.models import load_model
 import dlib
 from imutils import face_utils
 from scipy.spatial import distance
+import base64
 import h5py
 import json
 
@@ -52,6 +53,7 @@ def process_frame(frame):
     (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
     (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
     
+    emotion_label = "No Face Detected"
     for rect in rects:
         shape = predictor(gray, rect)
         shape = face_utils.shape_to_np(shape)
@@ -64,34 +66,29 @@ def process_frame(frame):
         prediction_result = np.argmax(prediction)
         emotion_label = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"][prediction_result]
 
+        # Draw rectangle and label
         cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
         cv2.putText(frame, emotion_label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    return frame
+    
+    return emotion_label
 
-# Video stream generator
-def generate_frames():
-    cap = cv2.VideoCapture(0)
-    while True:
-        success, frame = cap.read()
-        if not success:
-            break
-        frame = process_frame(frame)
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-    cap.release()
+# Route to handle frame processing from the website
+@app.route('/process_frame', methods=['POST'])
+def process_frame_route():
+    data = request.json['image']
+    image_data = base64.b64decode(data.split(",")[1])
+    np_arr = np.frombuffer(image_data, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    
+    # Process the frame and get the emotion label
+    emotion = process_frame(frame)
+    return jsonify({"emotion": emotion})
 
-# Route to display video feed
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# Home route
+# Home route to render the HTML template
 @app.route('/')
 def index():
     return render_template('index.html')
 
 if __name__ == "__main__":
     load_emotion_model()
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)
