@@ -3,13 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emotion Detection</title>
+    <title>Webcam Emotion Detection</title>
 </head>
 <body>
-    <h1>Real-Time Emotion Detection</h1>
-    <div>
-        <img src="{{ url_for('video_feed') }}" width="640" height="480">
-    </div>
-    <p>Press 'q' in the terminal to stop the video feed.</p>
+    <h1>Real-time Emotion Detection</h1>
+    <video id="video" width="640" height="480" autoplay></video>
+    <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
+    <p id="emotion">Emotion: Loading...</p>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const emotionDisplay = document.getElementById('emotion');
+        const context = canvas.getContext('2d');
+
+        // Access the webcam
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(error => {
+                console.error("Error accessing the webcam: ", error);
+            });
+
+        // Capture frame and send to server every second
+        setInterval(() => {
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = canvas.toDataURL('image/jpeg');
+            
+            fetch('/process_frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: imageData })
+            })
+            .then(response => response.json())
+            .then(data => {
+                emotionDisplay.innerText = `Emotion: ${data.emotion}`;
+            })
+            .catch(error => console.error("Error sending frame: ", error));
+        }, 1000); // Adjust the interval as needed
+    </script>
 </body>
 </html>
