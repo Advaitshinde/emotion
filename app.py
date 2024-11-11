@@ -1,94 +1,127 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import cv2
 import numpy as np
+import base64
 from tensorflow.keras.models import load_model
 import dlib
 from imutils import face_utils
-from scipy.spatial import distance
-import base64
-import h5py
-import json
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Global variables for Dlib and Keras model
-shape_x, shape_y = 48, 48
-model_path = 'video.h5'
-face_detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("face_landmarks.dat")
-model = None
+# Load model and resources
+emotion_model = load_model('video.h5')
+face_detect = dlib.get_frontal_face_detector()
+predictor_landmarks = dlib.shape_predictor('face_landmarks.dat')
 
-def modify_h5_model(file_path):
-    with h5py.File(file_path, 'r+') as f:
-        config = json.loads(f.attrs['model_config'])
-        for layer in config['config']['layers']:
-            if 'kernel_initializer' in layer['config']:
-                layer['config']['kernel_initializer']['config'].pop('dtype', None)
-            if 'bias_initializer' in layer['config']:
-                layer['config']['bias_initializer']['config'].pop('dtype', None)
-            if layer['class_name'] == 'BatchNormalization':
-                for initializer in ['beta_initializer', 'gamma_initializer', 'moving_mean_initializer', 'moving_variance_initializer']:
-                    if initializer in layer['config']:
-                        layer['config'][initializer]['config'].pop('dtype', None)
-        f.attrs['model_config'] = json.dumps(config).encode('utf-8')
+def detect_iris_position(eye_region):
+    try:
+        gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
+        gray_eye = cv2.medianBlur(gray_eye, 5)
+        thresholded_eye = cv2.adaptiveThreshold(gray_eye, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
 
-# Load the emotion model    
-def load_emotion_model():
-    global model
-    modify_h5_model(model_path)
-    model = load_model(model_path)
+        contours, _ = cv2.findContours(thresholded_eye, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            M = cv2.moments(largest_contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                if cX < eye_region.shape[1] / 3:
+                    return "Left"
+                elif cX > 2 * eye_region.shape[1] / 3:
+                    return "Right"
+                else:
+                    return "Center"
+    except Exception as e:
+        print(f"Error in detect_iris_position: {e}")
+    return "Unknown"
 
-# Function to calculate eye aspect ratio
-def eye_aspect_ratio(eye):
-    A = distance.euclidean(eye[1], eye[5])
-    B = distance.euclidean(eye[2], eye[4])
-    C = distance.euclidean(eye[0], eye[3])
-    return (A + B) / (2.0 * C)
+def encode_image_to_base64(image):
+    _, buffer = cv2.imencode('.jpg', image)
+    return base64.b64encode(buffer).decode('utf-8')
 
-# Function to process frames and add annotations
-def process_frame(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    rects = face_detector(gray, 1)
-    (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
-    (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
-    
-    emotion_label = "No Face Detected"
-    for rect in rects:
-        shape = predictor(gray, rect)
-        shape = face_utils.shape_to_np(shape)
-        (x, y, w, h) = face_utils.rect_to_bb(rect)
-        face = gray[y:y+h, x:x+w]
-        face = cv2.resize(face, (shape_x, shape_y)).astype(np.float32) / 255.0
-        face = np.reshape(face, (1, shape_x, shape_y, 1))
-
-        prediction = model.predict(face)
-        prediction_result = np.argmax(prediction)
-        emotion_label = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"][prediction_result]
-
-        # Draw rectangle and label
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        cv2.putText(frame, emotion_label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    
-    return emotion_label
-
-# Route to handle frame processing from the website
-@app.route('/process_frame', methods=['POST'])
-def process_frame_route():
-    data = request.json['image']
-    image_data = base64.b64decode(data.split(",")[1])
-    np_arr = np.frombuffer(image_data, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    
-    # Process the frame and get the emotion label
-    emotion = process_frame(frame)
-    return jsonify({"emotion": emotion})
-
-# Home route to render the HTML template
 @app.route('/')
 def index():
     return render_template('index.html')
 
-if __name__ == "__main__":
-    load_emotion_model()
-    app.run(host="0.0.0.0", port=5000)
+
+@app.route('/process_frame', methods=['POST'])
+def process_frame():
+    try:
+        data = request.get_json()
+        image_data = base64.b64decode(data['image'].split(',')[1])
+        np_img = np.frombuffer(image_data, np.uint8)
+        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        rects = face_detect(gray, 1)
+        num_faces = len(rects)
+        attentive = 'no'
+        emotion_label = "Unknown"
+        emotion_confidences = {}
+        gaze_direction = "Unknown"
+        face_detected = False
+
+        for rect in rects:
+            face_detected = True
+            shape = predictor_landmarks(gray, rect)
+            shape = face_utils.shape_to_np(shape)
+            
+            # Draw landmarks on the frame
+            for (x, y) in shape:
+                cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
+
+            # Save the frame with landmarks
+            cv2.imwrite('static/images/landmark.png', frame)  # Save the image here
+
+            x, y, w, h = face_utils.rect_to_bb(rect)
+            face = gray[y:y+h, x:x+w]
+            face_resized = cv2.resize(face, (48, 48)).reshape(1, 48, 48, 1) / 255.0
+            prediction = emotion_model.predict(face_resized)[0]
+            emotion_label = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"][np.argmax(prediction)]
+            emotion_confidences = {emotion: round(float(prob), 2) for emotion, prob in zip(
+                ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"], prediction)}
+            
+            # Eye extraction and gaze direction
+            left_eye_points = shape[face_utils.FACIAL_LANDMARKS_IDXS["left_eye"][0]:face_utils.FACIAL_LANDMARKS_IDXS["left_eye"][1]]
+            right_eye_points = shape[face_utils.FACIAL_LANDMARKS_IDXS["right_eye"][0]:face_utils.FACIAL_LANDMARKS_IDXS["right_eye"][1]]
+            
+            left_eye_box = cv2.boundingRect(np.array([left_eye_points]))
+            right_eye_box = cv2.boundingRect(np.array([right_eye_points]))
+
+            left_eye_img = frame[left_eye_box[1]:left_eye_box[1]+left_eye_box[3], left_eye_box[0]:left_eye_box[0]+left_eye_box[2]]
+            right_eye_img = frame[right_eye_box[1]:right_eye_box[1]+right_eye_box[3], right_eye_box[0]:right_eye_box[0]+right_eye_box[2]]
+
+            left_gaze = detect_iris_position(left_eye_img) if left_eye_img.size else "Unknown"
+            right_gaze = detect_iris_position(right_eye_img) if right_eye_img.size else "Unknown"
+            
+            if left_gaze == "Center" and right_gaze == "Center":
+                gaze_direction = "Center"
+            elif left_gaze == "Left" or right_gaze == "Left":
+                gaze_direction = "Left"
+            elif left_gaze == "Right" or right_gaze == "Right":
+                gaze_direction = "Right"
+
+            attentive = "Yes" if gaze_direction == "Center" else "No"
+
+        # Encode the frame with landmarks as base64
+        frame_with_landmarks = encode_image_to_base64(frame)
+        # Save the frame with landmarks
+        cv2.imwrite('static/images/landmark.png', frame)  # Save the image here
+
+        response = {
+            "emotion": emotion_label,
+            "emotion_confidences": emotion_confidences,
+            "num_faces": num_faces,
+            "gaze_direction": gaze_direction,
+            "attentive": attentive,
+            "frame_with_landmarks": f"data:image/jpeg;base64,{frame_with_landmarks}"
+        }
+
+        return jsonify(response)
+    except Exception as e:
+        print(f"Error processing frame: {e}")
+        return jsonify({"error": "Error processing frame."}), 400
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
