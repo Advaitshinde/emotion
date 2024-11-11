@@ -3,45 +3,155 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Webcam Emotion Detection</title>
+    <title>Real-Time Face Coding</title>
+    <style>
+        body {
+            background-color: black;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+        video {
+            width: 60%;
+            margin-bottom: 20px;
+        }
+        #emotion, #gaze, #attentive, #num_faces {
+            font-size: 20px;
+            margin-top: 10px;
+        }
+        #refreshMessage {
+            font-size: 24px;
+            color: red;
+            margin-top: 20px;
+            display: none; /* Initially hidden */
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h1>Real-time Emotion Detection</h1>
-    <video id="video" width="640" height="480" autoplay></video>
-    <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
-    <p id="emotion">Emotion: Loading...</p>
+    <h1>Real-Time Emotion Detection</h1>
+    <video id="videoElement" autoplay></video>
+    <div id="emotion">Emotion: Unknown</div>
+    <div id="gaze">Gaze Direction: Unknown</div>
+    <div id="attentive">Attentive: Yes</div>
+    <div id="num_faces">Number of Faces: 0</div>
+    
+    <!-- Display the frame with landmarks -->
+    <img id="frameWithLandmarks" alt="Frame with landmarks" style="width: 60%; margin-top: 20px; border: 2px solid white;">
+    <!-- Refresh message -->
+    <div id="refreshMessage">Session ended. Please refresh the page.</div>
+
+    <!-- Canvas for Chart.js chart -->
+    <canvas id="emotionChart" width="400" height="200"></canvas>
 
     <script>
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const emotionDisplay = document.getElementById('emotion');
-        const context = canvas.getContext('2d');
+        const video = document.getElementById('videoElement');
+        const emotionChartCtx = document.getElementById('emotionChart').getContext('2d');
+        const refreshMessage = document.getElementById('refreshMessage');
+        let intervalId;
 
-        // Access the webcam
-        navigator.mediaDevices.getUserMedia({ video: true })
-            .then(stream => {
+        // Initialize Chart.js chart
+        const emotionChart = new Chart(emotionChartCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral'],
+                datasets: [{
+                    label: 'Emotion Confidence',
+                    data: [0, 0, 0, 0, 0, 0, 0],
+                    backgroundColor: [
+                        'rgba(255, 99, 132, 0.2)',
+                        'rgba(54, 162, 235, 0.2)',
+                        'rgba(255, 206, 86, 0.2)',
+                        'rgba(75, 192, 192, 0.2)',
+                        'rgba(153, 102, 255, 0.2)',
+                        'rgba(255, 159, 64, 0.2)',
+                        'rgba(201, 203, 207, 0.2)'
+                    ],
+                    borderColor: [
+                        'rgba(255, 99, 132, 1)',
+                        'rgba(54, 162, 235, 1)',
+                        'rgba(255, 206, 86, 1)',
+                        'rgba(75, 192, 192, 1)',
+                        'rgba(153, 102, 255, 1)',
+                        'rgba(255, 159, 64, 1)',
+                        'rgba(201, 203, 207, 1)'
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        function updateChart(emotionConfidences) {
+            emotionChart.data.datasets[0].data = [
+                emotionConfidences.Angry,
+                emotionConfidences.Disgust,
+                emotionConfidences.Fear,
+                emotionConfidences.Happy,
+                emotionConfidences.Sad,
+                emotionConfidences.Surprise,
+                emotionConfidences.Neutral
+            ];
+            emotionChart.update();
+        }
+
+        async function sendFrame() {
+            try {
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                const frameData = canvas.toDataURL('image/jpeg');
+                const response = await fetch('/process_frame', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: frameData })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    console.error(data.error);
+                    return;
+                }
+
+                document.getElementById('emotion').textContent = `Emotion: ${data.emotion}`;
+                document.getElementById('gaze').textContent = `Gaze Direction: ${data.gaze_direction}`;
+                document.getElementById('attentive').textContent = `Attentive: ${data.attentive}`;
+                document.getElementById('num_faces').textContent = `Number of Faces: ${data.num_faces}`;
+                
+                updateChart(data.emotion_confidences);
+
+                // Set the frame with landmarks as source of <img> tag
+                document.getElementById('frameWithLandmarks').src = data.frame_with_landmarks;
+            } catch (error) {
+                console.error("Error sending frame:", error);
+            }
+        }
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
-            })
-            .catch(error => {
-                console.error("Error accessing the webcam: ", error);
-            });
+            } catch (error) {
+                console.error("Error accessing webcam:", error);
+            }
+        }
 
-        // Capture frame and send to server every second
-        setInterval(() => {
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const imageData = canvas.toDataURL('image/jpeg');
-            
-            fetch('/process_frame', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: imageData })
-            })
-            .then(response => response.json())
-            .then(data => {
-                emotionDisplay.innerText = `Emotion: ${data.emotion}`;
-            })
-            .catch(error => console.error("Error sending frame: ", error));
-        }, 1000); // Adjust the interval as needed
+        // Start the camera and detection interval
+        setupCamera();
+        intervalId = setInterval(sendFrame, 500);
+
+        // Stop detection and display refresh message after 60 seconds
+        setTimeout(() => {
+            clearInterval(intervalId);
+            refreshMessage.style.display = 'block';
+        }, 60000); // 60000 milliseconds = 60 seconds
     </script>
 </body>
 </html>
